@@ -12,7 +12,6 @@ Sequence runner rules:
   * Sequences are plain `async def fn(robot): ...` — write them in sequences.py.
 """
 
-import time
 import uasyncio as asyncio
 
 from motors import Motor, MotorPair, PWM_MAX
@@ -21,76 +20,29 @@ from motors import Motor, MotorPair, PWM_MAX
 # ----------------------------------------------------------- Tilt brake
 
 class TiltBrake:
-    """Holds the tilt arm against gravity with a low PWM, adjusting with
-    feedback from an angle potentiometer.
+    """Applies a fixed PWM to hold the tilt arm against gravity.
 
-    feedforward(extension_mm) -> base PWM. Tune the table for your arm.
-    The hold loop watches arm angle and bumps PWM up if the arm drifts down.
+    Pure feedforward — no loop, no async, no feedback. The PWM hardware
+    register holds the value once set, so no periodic task is needed.
+
+    Tune BRAKE_PWM until the arm holds without moving.
+    Positive = whichever direction holds the arm up on your wiring.
+    If the arm moves DOWN when brake is on, negate BRAKE_PWM.
     """
 
-    # Direction sign: +1 if positive PWM lifts the arm. Flip if needed.
-    LIFT_SIGN = +1
+    BRAKE_PWM = 4000   # out of 65535. tune this.
 
-    # Tunable feedforward table: list of (extension_mm, base_pwm). Linear interp.
-    FF_TABLE = (
-        (0,    4000),
-        (100,  7000),
-        (250, 11000),
-        (450, 16000),
-    )
-
-    DRIFT_DEG_PER_SAMPLE = 0.8   # below this drop, bump brake up
-    BUMP_PWM             = 1500
-    BLEED_PWM            = 800   # bleed correction back down each loop
-    MAX_CORRECTION       = 25000
-    LOOP_MS              = 50
-
-    def __init__(self, motor: Motor, angle_pot, extension_estimator=None,
-                 name="tilt_brake"):
+    def __init__(self, motor: Motor, name="tilt_brake"):
         self.motor = motor
-        self.angle_pot = angle_pot
-        self.extension_estimator = extension_estimator  # callable -> mm
         self.name = name
-        self._task = None
         self._active = False
-        self._correction = 0
-
-    def _feedforward(self):
-        if self.extension_estimator is None:
-            ext = 0
-        else:
-            try:
-                ext = self.extension_estimator()
-            except Exception:
-                ext = 0
-        table = self.FF_TABLE
-        if ext <= table[0][0]:
-            return table[0][1]
-        if ext >= table[-1][0]:
-            return table[-1][1]
-        for i in range(1, len(table)):
-            x0, y0 = table[i - 1]
-            x1, y1 = table[i]
-            if ext <= x1:
-                t = (ext - x0) / (x1 - x0)
-                return int(y0 + (y1 - y0) * t)
-        return table[-1][1]
-
-    async def _loop(self):
-        while self._active:
-            self.motor.set(self._feedforward() * self.LIFT_SIGN)
-            await asyncio.sleep_ms(self.LOOP_MS)
 
     def start(self):
-        if self._active:
-            return
         self._active = True
-        self._correction = 0
-        self._task = asyncio.create_task(self._loop())
+        self.motor.set(self.BRAKE_PWM)
 
     def stop(self):
         self._active = False
-        self._task = None
         self.motor.stop()
 
     @property

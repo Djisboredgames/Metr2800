@@ -81,7 +81,7 @@ def build_robot():
         except AttributeError: pass
         r.tof_rock = TOF(tof0, "tof_rock")
         print("tof_rock OK")
-    except Exception as e:
+    except BaseException as e:
         print("tof_rock skipped:", e)
 
     try:
@@ -92,7 +92,7 @@ def build_robot():
         except AttributeError: pass
         r.tof_extension = TOF(tof1, "tof_ext")
         print("tof_extension OK")
-    except Exception as e:
+    except BaseException as e:
         print("tof_extension skipped:", e)
 
     try:
@@ -100,16 +100,11 @@ def build_robot():
                                  deg_min=0, deg_max=180)
         r.tilt_angle  = AnglePot(TILT_POT_PIN,  name="tilt_pot",
                                  deg_min=0, deg_max=180)
-    except Exception as e:
+    except BaseException as e:
         print("pots skipped:", e)
 
-    # ---- tilt brake (only if we have an angle pot)
-    if r.tilt_angle is not None:
-        def ext_estimator():
-            if r.tof_extension is None:
-                return 0
-            return r.tof_extension._last or 0
-        r.tilt_brake = TiltBrake(r.tilt, r.tilt_angle, ext_estimator)
+    # ---- tilt brake (always available, no sensors required)
+    r.tilt_brake = TiltBrake(r.tilt)
 
     sequences.register_all(r)
     return r
