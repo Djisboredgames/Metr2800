@@ -77,19 +77,9 @@ class TiltBrake:
         return table[-1][1]
 
     async def _loop(self):
-        last_angle = self.angle_pot.read_deg()
         while self._active:
+            self.motor.set(self._feedforward() * self.LIFT_SIGN)
             await asyncio.sleep_ms(self.LOOP_MS)
-            cur = self.angle_pot.read_deg()
-            drop = last_angle - cur          # +ve means arm fell
-            if drop > self.DRIFT_DEG_PER_SAMPLE:
-                self._correction = min(self._correction + self.BUMP_PWM,
-                                       self.MAX_CORRECTION)
-            else:
-                self._correction = max(self._correction - self.BLEED_PWM, 0)
-            last_angle = cur
-            pwm = (self._feedforward() + self._correction) * self.LIFT_SIGN
-            self.motor.set(pwm)
 
     def start(self):
         if self._active:
