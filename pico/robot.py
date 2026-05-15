@@ -1,15 +1,5 @@
 """
 Robot facade + sequence runner + tilt brake.
-
-This module is where the framework comes together. main.py builds a Robot
-instance with all the wired-up motors/sensors and hands it to the web server.
-sequences.py uses the Robot to compose moves.
-
-Sequence runner rules:
-  * Only ONE sequence may run at a time.
-  * Starting a new sequence while one is running is REJECTED (returns False).
-  * E-stop cancels the running sequence and halts every motor immediately.
-  * Sequences are plain `async def fn(robot): ...` — write them in sequences.py.
 """
 
 import uasyncio as asyncio
@@ -22,19 +12,15 @@ from motors import Motor, MotorPair, PWM_MAX
 class TiltBrake:
     """Applies a fixed PWM to hold the tilt arm against gravity.
 
-    Pure feedforward — no loop, no async, no feedback. The PWM hardware
-    register holds the value once set, so no periodic task is needed.
-
-    Tune BRAKE_PWM until the arm holds without moving.
-    Positive = whichever direction holds the arm up on your wiring.
-    If the arm moves DOWN when brake is on, negate BRAKE_PWM.
+    No loop, no feedback, no async. PWM hardware holds the value once set.
+    Tune BRAKE_PWM until the arm holds without drifting.
+    If the arm moves DOWN when brake is on, make BRAKE_PWM negative.
     """
 
-    BRAKE_PWM = 4000   # out of 65535. tune this.
+    BRAKE_PWM = 4000   # out of 65535 — tune this
 
-    def __init__(self, motor: Motor, name="tilt_brake"):
+    def __init__(self, motor: Motor):
         self.motor = motor
-        self.name = name
         self._active = False
 
     def start(self):
@@ -54,35 +40,30 @@ class TiltBrake:
 
 class Robot:
     def __init__(self):
-        # populated by main.py before run()
         self.wheels: MotorPair = None
         self.extension: Motor = None
         self.tilt: Motor = None
         self.scoop: Motor = None
 
-        self.tof_rock = None          # TOF for rock detection
-        self.tof_extension = None     # TOF for extension length (optional)
-        self.scoop_angle = None       # AnglePot
-        self.tilt_angle = None        # AnglePot
+        self.tof_rock = None
+        self.tof_extension = None
+        self.scoop_angle = None
+        self.tilt_angle = None
 
         self.tilt_brake: TiltBrake = None
 
-        # named sequences registered by sequences.py
         self.sequences = {}
 
-        # state
         self._seq_task = None
         self._seq_name = None
         self.status = "idle"
         self.last_error = ""
 
-        # scoop tap-to-toggle state (kept from original UI)
         self.scoop_on = False
 
     # ---------------- sequence runner
 
     def register(self, name, coro_fn):
-        """Register a sequence: coro_fn(robot) -> awaitable."""
         self.sequences[name] = coro_fn
 
     def is_running(self):
@@ -136,7 +117,7 @@ class Robot:
         self.scoop_on = False
         self.status = "ESTOPPED"
 
-    # ---------------- direct manual commands (used by the web UI buttons)
+    # ---------------- manual controls
 
     def wheels_forward(self):  self.wheels.forward()
     def wheels_back(self):     self.wheels.back()
@@ -150,10 +131,10 @@ class Robot:
 
     def tilt_up(self):
         if self.tilt_brake is not None: self.tilt_brake.stop()
-        self.tilt.set(int(0.3 * PWM_MAX) * TiltBrake.LIFT_SIGN)
+        self.tilt.set(int(0.3 * PWM_MAX))
     def tilt_down(self):
         if self.tilt_brake is not None: self.tilt_brake.stop()
-        self.tilt.set(-int(0.3 * PWM_MAX) * TiltBrake.LIFT_SIGN)
+        self.tilt.set(-int(0.3 * PWM_MAX))
     def tilt_stop(self):
         self.tilt.stop()
 
@@ -169,7 +150,7 @@ class Robot:
         else:
             self.scoop.stop()
 
-    # ---------------- snapshot for UI status
+    # ---------------- status snapshot
 
     def snapshot(self):
         d = {
