@@ -14,13 +14,15 @@ import time
 SSID             = "PicoBot"
 PASSWORD         = "robotsrule"
 
-TILT_SPEED       = 20_000       # ~30%
-EXT_FWD_SPEED    = 52_000       # ~80%
-EXT_BCK_SPEED    = 26_000       # ~40%
+TILT_SPEED       = 20_000
+EXT_FWD_SPEED    = 22_000
+EXT_BCK_SPEED    = 26_000
+SCOOP_FWD_SPEED  = 30_000
+SCOOP_BCK_SPEED  = 30_000
 TILT_BRAKE_PWM   = 6_000        # upward hold — increase if arm drops
 
-JOLT_DUTY        = 52_000       # initial kick (~80%)
-JOLT_MS          = 80
+JOLT_DUTY        = 35_000
+JOLT_MS          = 70
 
 PWM_FREQ         = 1_000
 
@@ -43,22 +45,26 @@ class BTS7960:
         self.r.duty_u16(0)
 
 # ── Hardware ─────────────────────────────────────────────────────────────
-tilt = BTS7960(lpwm_pin=0, rpwm_pin=1)
-ext  = BTS7960(lpwm_pin=6, rpwm_pin=7)
+tilt  = BTS7960(lpwm_pin=0,  rpwm_pin=1)
+ext   = BTS7960(lpwm_pin=6,  rpwm_pin=7)
+scoop = BTS7960(lpwm_pin=20, rpwm_pin=21)  # ⚠ GP20/21 share PWM slice with GP4/5 (wheels)
 
 status_led = Pin(9,  Pin.OUT)
 button_led = Pin(10, Pin.OUT)
 
 # ── Mutable speed state ──────────────────────────────────────────────────
 spd = {
-    "tilt_up":  TILT_SPEED,
-    "ext_fwd":  EXT_FWD_SPEED,
-    "ext_bck":  EXT_BCK_SPEED,
-    "brake":    TILT_BRAKE_PWM,
+    "tilt_up":   TILT_SPEED,
+    "ext_fwd":   EXT_FWD_SPEED,
+    "ext_bck":   EXT_BCK_SPEED,
+    "scoop_fwd": SCOOP_FWD_SPEED,
+    "scoop_bck": SCOOP_BCK_SPEED,
+    "brake":     TILT_BRAKE_PWM,
 }
 
-_tilt_task = None
-_ext_task  = None
+_tilt_task  = None
+_ext_task   = None
+_scoop_task = None
 
 def _cancel(task):
     if task is not None:
@@ -80,6 +86,15 @@ async def _ext_run(direction):
     else:                  ext.backward(duty)
     await asyncio.sleep_ms(60_000)
 
+async def _scoop_run(direction):
+    duty = spd["scoop_fwd"] if direction == "fwd" else spd["scoop_bck"]
+    if direction == "fwd": scoop.forward(JOLT_DUTY)
+    else:                  scoop.backward(JOLT_DUTY)
+    await asyncio.sleep_ms(JOLT_MS)
+    if direction == "fwd": scoop.forward(duty)
+    else:                  scoop.backward(duty)
+    await asyncio.sleep_ms(60_000)
+
 def tilt_cmd(cmd):
     global _tilt_task
     _cancel(_tilt_task); _tilt_task = None
@@ -98,12 +113,22 @@ def ext_cmd(cmd):
     else:
         ext.coast()
 
+def scoop_cmd(cmd):
+    global _scoop_task
+    _cancel(_scoop_task); _scoop_task = None
+    if cmd in ("fwd", "bck"):
+        _scoop_task = asyncio.create_task(_scoop_run(cmd))
+    else:
+        scoop.coast()
+
 def all_stop():
-    global _tilt_task, _ext_task
-    _cancel(_tilt_task); _tilt_task = None
-    _cancel(_ext_task);  _ext_task  = None
+    global _tilt_task, _ext_task, _scoop_task
+    _cancel(_tilt_task);  _tilt_task  = None
+    _cancel(_ext_task);   _ext_task   = None
+    _cancel(_scoop_task); _scoop_task = None
     tilt.forward(spd["brake"])
     ext.coast()
+    scoop.coast()
 
 all_stop()
 
@@ -199,6 +224,30 @@ input[type=range]{width:92%;accent-color:#0af}
 </div>
 
 <div class="card">
+  <h2>Scoop</h2>
+  <div class="row">
+    <button ontouchstart="go('scoop','fwd')" ontouchend="go('scoop','stop')"
+            onmousedown="go('scoop','fwd')"  onmouseup="go('scoop','stop')"
+            onmouseleave="go('scoop','stop')">&#9654; Open</button>
+    <button ontouchstart="go('scoop','bck')" ontouchend="go('scoop','stop')"
+            onmousedown="go('scoop','bck')"  onmouseup="go('scoop','stop')"
+            onmouseleave="go('scoop','stop')">&#9664; Close</button>
+  </div>
+  <div class="sl">
+    <label>Open speed: <span id="sfv">SFSPD</span></label>
+    <input type="range" min="0" max="65535" step="500" value="SFSPD"
+      oninput="document.getElementById('sfv').textContent=this.value"
+      onchange="setspd('scoop_fwd',this.value)">
+  </div>
+  <div class="sl">
+    <label>Close speed: <span id="sbv">SBSPD</span></label>
+    <input type="range" min="0" max="65535" step="500" value="SBSPD"
+      oninput="document.getElementById('sbv').textContent=this.value"
+      onchange="setspd('scoop_bck',this.value)">
+  </div>
+</div>
+
+<div class="card">
   <h2>LEDs</h2>
   <div class="row">
     <button id="sl" onclick="led('sl','status')">Status LED</button>
@@ -232,6 +281,8 @@ def _make_html():
     h = h.replace(b"TSPD",  str(spd["tilt_up"]).encode())
     h = h.replace(b"EFSPD", str(spd["ext_fwd"]).encode())
     h = h.replace(b"EBSPD", str(spd["ext_bck"]).encode())
+    h = h.replace(b"SFSPD", str(spd["scoop_fwd"]).encode())
+    h = h.replace(b"SBSPD", str(spd["scoop_bck"]).encode())
     h = h.replace(b"BPWM",  str(spd["brake"]).encode())
     return h
 
@@ -275,9 +326,10 @@ async def _client(reader, writer):
             p = _parse_qs(path)
             m = p.get(b"m", b"")
             d = p.get(b"d", b"").decode()
-            if   m == b"tilt": tilt_cmd(d)
-            elif m == b"ext":  ext_cmd(d)
-            elif m == b"stop": all_stop()
+            if   m == b"tilt":  tilt_cmd(d)
+            elif m == b"ext":   ext_cmd(d)
+            elif m == b"scoop": scoop_cmd(d)
+            elif m == b"stop":  all_stop()
             writer.write(_200)
 
         elif path.startswith(b"/spd"):
