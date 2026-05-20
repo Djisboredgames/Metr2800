@@ -3,9 +3,6 @@ bot.py — single-file Pico W robot controller
 Flash this as main.py on the Pico.
 
 WiFi AP:  PicoBot / robotsrule   →   http://192.168.4.1
-
-BTS7960 brake: both LPWM+RPWM HIGH = motor terminals shorted = regenerative hold.
-At 65535 the arm is locked hard; lower values give a softer hold.
 """
 
 import network
@@ -13,23 +10,21 @@ import uasyncio as asyncio
 from machine import Pin, PWM
 import time
 
-# ── Tunable constants ────────────────────────────────────────────────────
+# ── Tunable defaults (all adjustable at runtime via sliders) ─────────────
 SSID             = "PicoBot"
 PASSWORD         = "robotsrule"
 
-TILT_SPEED       = 20_000       # cruise duty (~30%)
-EXT_FWD_SPEED    = 52_000       # cruise duty out (~80%)
-EXT_BCK_SPEED    = 26_000       # cruise duty in  (~40%)
+TILT_SPEED       = 20_000       # ~30%
+EXT_FWD_SPEED    = 52_000       # ~80%
+EXT_BCK_SPEED    = 26_000       # ~40%
+TILT_BRAKE_PWM   = 6_000        # upward hold — increase if arm drops
 
-JOLT_DUTY        = 52_000       # initial kick duty (~80%)
-JOLT_MS          = 80           # how long the kick lasts
+JOLT_DUTY        = 52_000       # initial kick (~80%)
+JOLT_MS          = 80
 
-TILT_BRAKE_PWM   = 6_000        # holding force — small upward PWM to fight gravity
-                                 # increase if arm drops, decrease if motor overheats
+PWM_FREQ         = 1_000
 
-PWM_FREQ         = 1_000        # Hz
-
-# ── BTS7960 half-bridge driver ───────────────────────────────────────────
+# ── BTS7960 driver ───────────────────────────────────────────────────────
 class BTS7960:
     def __init__(self, lpwm_pin, rpwm_pin):
         self.l = PWM(Pin(lpwm_pin), freq=PWM_FREQ, duty_u16=0)
@@ -43,11 +38,6 @@ class BTS7960:
         self.r.duty_u16(0)
         self.l.duty_u16(min(duty, 65535))
 
-    def brake(self, duty=65535):
-        # Not used — kept for compatibility
-        self.l.duty_u16(min(duty, 65535))
-        self.r.duty_u16(min(duty, 65535))
-
     def coast(self):
         self.l.duty_u16(0)
         self.r.duty_u16(0)
@@ -59,60 +49,50 @@ ext  = BTS7960(lpwm_pin=6, rpwm_pin=7)
 status_led = Pin(9,  Pin.OUT)
 button_led = Pin(10, Pin.OUT)
 
-# ── Motor task management ────────────────────────────────────────────────
-brake_pwm   = TILT_BRAKE_PWM
-_tilt_task  = None
-_ext_task   = None
+# ── Mutable speed state ──────────────────────────────────────────────────
+spd = {
+    "tilt_up":  TILT_SPEED,
+    "ext_fwd":  EXT_FWD_SPEED,
+    "ext_bck":  EXT_BCK_SPEED,
+    "brake":    TILT_BRAKE_PWM,
+}
+
+_tilt_task = None
+_ext_task  = None
 
 def _cancel(task):
     if task is not None:
-        try:
-            task.cancel()
-        except:
-            pass
+        try: task.cancel()
+        except: pass
 
-# Jolt-then-cruise sequences
-async def _tilt_run(direction):
-    if direction == "up":
-        tilt.forward(JOLT_DUTY)
-        await asyncio.sleep_ms(JOLT_MS)
-        tilt.forward(TILT_SPEED)
-    else:
-        tilt.backward(JOLT_DUTY)
-        await asyncio.sleep_ms(JOLT_MS)
-        tilt.backward(TILT_SPEED)
-    await asyncio.sleep_ms(60_000)     # hold until cancelled
-
-async def _ext_run(direction):
-    if direction == "fwd":
-        ext.forward(JOLT_DUTY)
-        await asyncio.sleep_ms(JOLT_MS)
-        ext.forward(EXT_FWD_SPEED)
-    else:
-        ext.backward(JOLT_DUTY)
-        await asyncio.sleep_ms(JOLT_MS)
-        ext.backward(EXT_BCK_SPEED)
+async def _tilt_run():
+    tilt.forward(JOLT_DUTY)
+    await asyncio.sleep_ms(JOLT_MS)
+    tilt.forward(spd["tilt_up"])
     await asyncio.sleep_ms(60_000)
 
-# Settle to a gentle upward hold to fight gravity
-async def _tilt_brake_settle():
-    tilt.forward(brake_pwm)
+async def _ext_run(direction):
+    duty = spd["ext_fwd"] if direction == "fwd" else spd["ext_bck"]
+    if direction == "fwd": ext.forward(JOLT_DUTY)
+    else:                  ext.backward(JOLT_DUTY)
+    await asyncio.sleep_ms(JOLT_MS)
+    if direction == "fwd": ext.forward(duty)
+    else:                  ext.backward(duty)
+    await asyncio.sleep_ms(60_000)
 
 def tilt_cmd(cmd):
     global _tilt_task
-    _cancel(_tilt_task)
-    _tilt_task = None
-    if cmd in ("up", "down"):
-        _tilt_task = asyncio.create_task(_tilt_run(cmd))
+    _cancel(_tilt_task); _tilt_task = None
+    if cmd == "up":
+        _tilt_task = asyncio.create_task(_tilt_run())
     elif cmd == "brake":
-        _tilt_task = asyncio.create_task(_tilt_brake_settle())
-    else:
+        tilt.forward(spd["brake"])
+    else:  # "down" or "coast" — let gravity do the work
         tilt.coast()
 
 def ext_cmd(cmd):
     global _ext_task
-    _cancel(_ext_task)
-    _ext_task = None
+    _cancel(_ext_task); _ext_task = None
     if cmd in ("fwd", "bck"):
         _ext_task = asyncio.create_task(_ext_run(cmd))
     else:
@@ -122,13 +102,12 @@ def all_stop():
     global _tilt_task, _ext_task
     _cancel(_tilt_task); _tilt_task = None
     _cancel(_ext_task);  _ext_task  = None
-    tilt.forward(brake_pwm)
+    tilt.forward(spd["brake"])
     ext.coast()
 
-# Safe default on boot
 all_stop()
 
-# ── WiFi access point ────────────────────────────────────────────────────
+# ── WiFi AP ──────────────────────────────────────────────────────────────
 ap = network.WLAN(network.AP_IF)
 ap.active(True)
 ap.config(essid=SSID, password=PASSWORD)
@@ -137,7 +116,8 @@ while not ap.active():
 print("AP up:", ap.ifconfig()[0])
 
 # ── Web UI ───────────────────────────────────────────────────────────────
-_HTML_TEMPLATE = b"""\
+# Placeholders replaced at serve time: TSPD, EFSPD, EBSPD, BPWM
+_HTML = b"""\
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -151,7 +131,7 @@ h1{margin:0 0 4px;font-size:1.4rem}
 p.ip{margin:0 0 14px;font-size:.8rem;color:#666}
 .card{background:#1e1e1e;border-radius:14px;padding:14px;margin-bottom:12px}
 h2{margin:0 0 10px;font-size:.75rem;text-transform:uppercase;letter-spacing:.12em;color:#888}
-.row{display:flex;gap:8px;justify-content:center}
+.row{display:flex;gap:8px;justify-content:center;margin-bottom:8px}
 button{
   flex:1;padding:20px 6px;font-size:1rem;border:none;border-radius:10px;
   background:#2a2a2a;color:#ddd;cursor:pointer;transition:background .08s;
@@ -161,9 +141,10 @@ button:active,.lit{background:#0af!important;color:#000!important}
 .brake-btn{background:#7a4a00}
 .stop-btn{background:#5a0000;color:#f88;font-size:1.1rem;padding:22px;width:100%}
 .stop-btn:active{background:#c00!important;color:#fff!important}
-label{font-size:.85rem;color:#aaa}
-input[type=range]{width:92%;accent-color:#0af;margin-top:6px}
-#bval{color:#0af;font-weight:600}
+.sl{display:flex;flex-direction:column;align-items:center;margin-top:6px;gap:2px}
+.sl label{font-size:.8rem;color:#aaa}
+.sl span{color:#0af;font-weight:600}
+input[type=range]{width:92%;accent-color:#0af}
 </style>
 </head>
 <body>
@@ -173,19 +154,23 @@ input[type=range]{width:92%;accent-color:#0af;margin-top:6px}
 <div class="card">
   <h2>Tilt</h2>
   <div class="row">
-    <button ontouchstart="go('tilt','up')"   ontouchend="go('tilt','brake')"
-            onmousedown="go('tilt','up')"    onmouseup="go('tilt','brake')"
+    <button ontouchstart="go('tilt','up')"    ontouchend="go('tilt','brake')"
+            onmousedown="go('tilt','up')"     onmouseup="go('tilt','brake')"
             onmouseleave="go('tilt','brake')">&#9650; Up</button>
-    <button class="brake-btn" onclick="go('tilt','brake')">&#9646; Brake</button>
-    <button ontouchstart="go('tilt','down')" ontouchend="go('tilt','brake')"
-            onmousedown="go('tilt','down')"  onmouseup="go('tilt','brake')"
-            onmouseleave="go('tilt','brake')">&#9660; Down</button>
+    <button class="brake-btn" onclick="go('tilt','brake')">&#9646; Hold</button>
+    <button onclick="go('tilt','down')">&#9660; Drop</button>
   </div>
-  <div style="margin-top:12px">
-    <label>Hold (up) PWM: <span id="bval">BPWM</span> / 65535</label>
+  <div class="sl">
+    <label>Up speed: <span id="tv">TSPD</span></label>
+    <input type="range" min="0" max="65535" step="500" value="TSPD"
+      oninput="document.getElementById('tv').textContent=this.value"
+      onchange="setspd('tilt_up',this.value)">
+  </div>
+  <div class="sl">
+    <label>Hold PWM: <span id="bv">BPWM</span></label>
     <input type="range" min="0" max="65535" step="500" value="BPWM"
-      oninput="document.getElementById('bval').textContent=this.value"
-      onchange="go('brake',this.value)">
+      oninput="document.getElementById('bv').textContent=this.value"
+      onchange="setspd('brake',this.value)">
   </div>
 </div>
 
@@ -198,6 +183,18 @@ input[type=range]{width:92%;accent-color:#0af;margin-top:6px}
     <button ontouchstart="go('ext','bck')" ontouchend="go('ext','stop')"
             onmousedown="go('ext','bck')"  onmouseup="go('ext','stop')"
             onmouseleave="go('ext','stop')">&#9664; In</button>
+  </div>
+  <div class="sl">
+    <label>Out speed: <span id="efv">EFSPD</span></label>
+    <input type="range" min="0" max="65535" step="500" value="EFSPD"
+      oninput="document.getElementById('efv').textContent=this.value"
+      onchange="setspd('ext_fwd',this.value)">
+  </div>
+  <div class="sl">
+    <label>In speed: <span id="ebv">EBSPD</span></label>
+    <input type="range" min="0" max="65535" step="500" value="EBSPD"
+      oninput="document.getElementById('ebv').textContent=this.value"
+      onchange="setspd('ext_bck',this.value)">
   </div>
 </div>
 
@@ -218,6 +215,9 @@ const ls={sl:false,bl:false};
 async function go(m,d){
   try{await fetch('/c?m='+m+'&d='+d,{method:'POST',keepalive:true})}catch(e){}
 }
+async function setspd(k,v){
+  try{await fetch('/spd?k='+k+'&v='+v,{method:'POST',keepalive:true})}catch(e){}
+}
 async function led(id,name){
   ls[id]=!ls[id];
   document.getElementById(id).classList.toggle('lit',ls[id]);
@@ -228,8 +228,12 @@ async function led(id,name){
 </html>"""
 
 def _make_html():
-    b = str(TILT_BRAKE_PWM).encode()
-    return _HTML_TEMPLATE.replace(b"BPWM", b)
+    h = _HTML
+    h = h.replace(b"TSPD",  str(spd["tilt_up"]).encode())
+    h = h.replace(b"EFSPD", str(spd["ext_fwd"]).encode())
+    h = h.replace(b"EBSPD", str(spd["ext_bck"]).encode())
+    h = h.replace(b"BPWM",  str(spd["brake"]).encode())
+    return h
 
 def _parse_qs(path):
     out = {}
@@ -245,7 +249,6 @@ _200 = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 _404 = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
 async def _client(reader, writer):
-    global brake_pwm
     try:
         line = await asyncio.wait_for(reader.readline(), 4)
         if not line:
@@ -262,26 +265,29 @@ async def _client(reader, writer):
 
         if path == b"/" or path == b"":
             body = _make_html()
-            hdr = (
+            writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                 b"Content-Length: " + str(len(body)).encode() +
-                b"\r\nConnection: close\r\n\r\n"
+                b"\r\nConnection: close\r\n\r\n" + body
             )
-            writer.write(hdr + body)
 
         elif path.startswith(b"/c"):
             p = _parse_qs(path)
             m = p.get(b"m", b"")
             d = p.get(b"d", b"").decode()
-            if m == b"tilt":
-                tilt_cmd(d)
-            elif m == b"ext":
-                ext_cmd(d)
-            elif m == b"brake":
-                brake_pwm = max(0, min(65535, int(d)))
-                asyncio.create_task(_tilt_brake_settle())
-            elif m == b"stop":
-                all_stop()
+            if   m == b"tilt": tilt_cmd(d)
+            elif m == b"ext":  ext_cmd(d)
+            elif m == b"stop": all_stop()
+            writer.write(_200)
+
+        elif path.startswith(b"/spd"):
+            p = _parse_qs(path)
+            k = p.get(b"k", b"").decode()
+            v = max(0, min(65535, int(p.get(b"v", b"0"))))
+            if k in spd:
+                spd[k] = v
+                if k == "brake":
+                    tilt.forward(v)     # apply new hold immediately
             writer.write(_200)
 
         elif path.startswith(b"/led"):
@@ -300,10 +306,8 @@ async def _client(reader, writer):
         print("ERR", e)
     finally:
         writer.close()
-        try:
-            await writer.wait_closed()
-        except:
-            pass
+        try: await writer.wait_closed()
+        except: pass
 
 async def main():
     server = await asyncio.start_server(_client, "0.0.0.0", 80, backlog=4)
