@@ -1,34 +1,29 @@
 """
-servo_test.py — sweeps a servo back and forth
-Servo signal pin: GP15 (change SERVO_PIN if needed)
+servo_test.py — steps servo to 0°, 90°, 180° in a loop
+Servo signal: GP15  (change SERVO_PIN if needed)
+Servo power:  VBUS (pin 40) = 5V from USB  <-- use this, NOT 3.3V
+Servo GND:    any GND pin
 """
 
 from machine import Pin, PWM
 import utime
 
 SERVO_PIN = 15
-PWM_FREQ  = 50       # Hz — standard servo frequency
+MIN_US    = 500     # pulse for 0°   — widen toward 1000 if servo doesn't reach end
+MAX_US    = 2500    # pulse for 180° — narrow toward 2000 if servo grinds at end
 
-# Pulse widths in microseconds
-MIN_US = 500         # ~0°
-MAX_US = 2500        # ~180°
+servo = PWM(Pin(SERVO_PIN), freq=50)
 
-servo = PWM(Pin(SERVO_PIN), freq=PWM_FREQ)
-
-def set_us(us):
-    # Convert microseconds to 16-bit duty cycle at 50Hz (period = 20000us)
+def move(deg):
+    us   = MIN_US + (MAX_US - MIN_US) * deg // 180
     duty = int(us / 20_000 * 65535)
     servo.duty_u16(duty)
+    print("angle:", deg, "  pulse us:", us)
 
-def set_angle(deg):
-    us = MIN_US + (MAX_US - MIN_US) * deg // 180
-    set_us(us)
-
-# Sweep back and forth
 while True:
-    for angle in range(0, 181, 2):
-        set_angle(angle)
-        utime.sleep_ms(10)
-    for angle in range(180, -1, -2):
-        set_angle(angle)
-        utime.sleep_ms(10)
+    move(0)
+    utime.sleep_ms(1000)
+    move(90)
+    utime.sleep_ms(1000)
+    move(180)
+    utime.sleep_ms(1000)
