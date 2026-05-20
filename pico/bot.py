@@ -3,6 +3,9 @@ bot.py — single-file Pico W robot controller
 Flash this as main.py on the Pico.
 
 WiFi AP:  PicoBot / robotsrule   →   http://192.168.4.1
+
+BTS7960 brake: both LPWM+RPWM HIGH = motor terminals shorted = regenerative hold.
+At 65535 the arm is locked hard; lower values give a softer hold.
 """
 
 import network
@@ -11,15 +14,20 @@ from machine import Pin, PWM
 import time
 
 # ── Tunable constants ────────────────────────────────────────────────────
-SSID            = "PicoBot"
-PASSWORD        = "robotsrule"
+SSID             = "PicoBot"
+PASSWORD         = "robotsrule"
 
-TILT_SPEED      = 20_000        # PWM duty out of 65535 (~30%)
-EXT_FWD_SPEED   = 52_000        # ~80%
-EXT_BCK_SPEED   = 26_000        # ~40%
-TILT_BRAKE_PWM  = 4_000         # holding force — increase if arm drops
+TILT_SPEED       = 20_000       # cruise duty (~30%)
+EXT_FWD_SPEED    = 52_000       # cruise duty out (~80%)
+EXT_BCK_SPEED    = 26_000       # cruise duty in  (~40%)
 
-PWM_FREQ        = 1_000         # Hz
+JOLT_DUTY        = 52_000       # initial kick duty (~80%)
+JOLT_MS          = 80           # how long the kick lasts
+
+TILT_BRAKE_PWM   = 65_535       # holding force — both pins HIGH = hard lock
+                                 # lower if motor overheats at rest
+
+PWM_FREQ         = 1_000        # Hz
 
 # ── BTS7960 half-bridge driver ───────────────────────────────────────────
 class BTS7960:
@@ -36,6 +44,7 @@ class BTS7960:
         self.l.duty_u16(min(duty, 65535))
 
     def brake(self, duty=65535):
+        # Both pins HIGH shorts the motor terminals — regenerative braking
         self.l.duty_u16(min(duty, 65535))
         self.r.duty_u16(min(duty, 65535))
 
@@ -50,21 +59,71 @@ ext  = BTS7960(lpwm_pin=6, rpwm_pin=7)
 status_led = Pin(9,  Pin.OUT)
 button_led = Pin(10, Pin.OUT)
 
-# ── State ────────────────────────────────────────────────────────────────
-brake_pwm = TILT_BRAKE_PWM      # mutable at runtime via slider
+# ── Motor task management ────────────────────────────────────────────────
+brake_pwm   = TILT_BRAKE_PWM
+_tilt_task  = None
+_ext_task   = None
+
+def _cancel(task):
+    if task is not None:
+        try:
+            task.cancel()
+        except:
+            pass
+
+# Jolt-then-cruise sequences
+async def _tilt_run(direction):
+    if direction == "up":
+        tilt.forward(JOLT_DUTY)
+        await asyncio.sleep_ms(JOLT_MS)
+        tilt.forward(TILT_SPEED)
+    else:
+        tilt.backward(JOLT_DUTY)
+        await asyncio.sleep_ms(JOLT_MS)
+        tilt.backward(TILT_SPEED)
+    await asyncio.sleep_ms(60_000)     # hold until cancelled
+
+async def _ext_run(direction):
+    if direction == "fwd":
+        ext.forward(JOLT_DUTY)
+        await asyncio.sleep_ms(JOLT_MS)
+        ext.forward(EXT_FWD_SPEED)
+    else:
+        ext.backward(JOLT_DUTY)
+        await asyncio.sleep_ms(JOLT_MS)
+        ext.backward(EXT_BCK_SPEED)
+    await asyncio.sleep_ms(60_000)
+
+# Brief hard-brake pulse then settle to holding value
+async def _tilt_brake_settle():
+    tilt.brake(65535)
+    await asyncio.sleep_ms(120)
+    tilt.brake(brake_pwm)
 
 def tilt_cmd(cmd):
-    if   cmd == "up":    tilt.forward(TILT_SPEED)
-    elif cmd == "down":  tilt.backward(TILT_SPEED)
-    elif cmd == "brake": tilt.brake(brake_pwm)
-    else:                tilt.coast()
+    global _tilt_task
+    _cancel(_tilt_task)
+    _tilt_task = None
+    if cmd in ("up", "down"):
+        _tilt_task = asyncio.create_task(_tilt_run(cmd))
+    elif cmd == "brake":
+        _tilt_task = asyncio.create_task(_tilt_brake_settle())
+    else:
+        tilt.coast()
 
 def ext_cmd(cmd):
-    if   cmd == "fwd":  ext.forward(EXT_FWD_SPEED)
-    elif cmd == "bck":  ext.backward(EXT_BCK_SPEED)
-    else:               ext.coast()
+    global _ext_task
+    _cancel(_ext_task)
+    _ext_task = None
+    if cmd in ("fwd", "bck"):
+        _ext_task = asyncio.create_task(_ext_run(cmd))
+    else:
+        ext.coast()
 
 def all_stop():
+    global _tilt_task, _ext_task
+    _cancel(_tilt_task); _tilt_task = None
+    _cancel(_ext_task);  _ext_task  = None
     tilt.brake(brake_pwm)
     ext.coast()
 
@@ -116,17 +175,17 @@ input[type=range]{width:92%;accent-color:#0af;margin-top:6px}
 <div class="card">
   <h2>Tilt</h2>
   <div class="row">
-    <button id="tu" ontouchstart="go('tilt','up')"   ontouchend="go('tilt','brake')"
-                    onmousedown="go('tilt','up')"     onmouseup="go('tilt','brake')"
-                    onmouseleave="go('tilt','brake')">&#9650; Up</button>
+    <button ontouchstart="go('tilt','up')"   ontouchend="go('tilt','brake')"
+            onmousedown="go('tilt','up')"    onmouseup="go('tilt','brake')"
+            onmouseleave="go('tilt','brake')">&#9650; Up</button>
     <button class="brake-btn" onclick="go('tilt','brake')">&#9646; Brake</button>
-    <button id="td" ontouchstart="go('tilt','down')" ontouchend="go('tilt','brake')"
-                    onmousedown="go('tilt','down')"   onmouseup="go('tilt','brake')"
-                    onmouseleave="go('tilt','brake')">&#9660; Down</button>
+    <button ontouchstart="go('tilt','down')" ontouchend="go('tilt','brake')"
+            onmousedown="go('tilt','down')"  onmouseup="go('tilt','brake')"
+            onmouseleave="go('tilt','brake')">&#9660; Down</button>
   </div>
   <div style="margin-top:12px">
-    <label>Brake PWM: <span id="bval">BPWM</span> / 65535</label>
-    <input type="range" min="0" max="65535" step="100" value="BPWM"
+    <label>Hold PWM: <span id="bval">BPWM</span> / 65535</label>
+    <input type="range" min="0" max="65535" step="500" value="BPWM"
       oninput="document.getElementById('bval').textContent=this.value"
       onchange="go('brake',this.value)">
   </div>
@@ -193,7 +252,6 @@ async def _client(reader, writer):
         line = await asyncio.wait_for(reader.readline(), 4)
         if not line:
             return
-        # drain remaining headers (don't care about them)
         while True:
             h = await asyncio.wait_for(reader.readline(), 2)
             if h in (b"\r\n", b""):
@@ -223,7 +281,7 @@ async def _client(reader, writer):
                 ext_cmd(d)
             elif m == b"brake":
                 brake_pwm = max(0, min(65535, int(d)))
-                tilt.brake(brake_pwm)       # apply immediately if already braking
+                asyncio.create_task(_tilt_brake_settle())
             elif m == b"stop":
                 all_stop()
             writer.write(_200)
