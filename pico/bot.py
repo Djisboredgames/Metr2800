@@ -183,7 +183,9 @@ input[type=range]{width:92%;accent-color:#0af}
             onmousedown="go('tilt','up')"     onmouseup="go('tilt','brake')"
             onmouseleave="go('tilt','brake')">&#9650; Up</button>
     <button class="brake-btn" onclick="go('tilt','brake')">&#9646; Hold</button>
-    <button onclick="go('tilt','down')">&#9660; Drop</button>
+    <button ontouchstart="go('tilt','down')" ontouchend="go('tilt','brake')"
+            onmousedown="go('tilt','down')"  onmouseup="go('tilt','brake')"
+            onmouseleave="go('tilt','brake')">&#9660; Drop</button>
   </div>
   <div class="sl">
     <label>Up speed: <span id="tv">TSPD</span></label>
