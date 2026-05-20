@@ -24,8 +24,8 @@ EXT_BCK_SPEED    = 26_000       # cruise duty in  (~40%)
 JOLT_DUTY        = 52_000       # initial kick duty (~80%)
 JOLT_MS          = 80           # how long the kick lasts
 
-TILT_BRAKE_PWM   = 65_535       # holding force — both pins HIGH = hard lock
-                                 # lower if motor overheats at rest
+TILT_BRAKE_PWM   = 6_000        # holding force — small upward PWM to fight gravity
+                                 # increase if arm drops, decrease if motor overheats
 
 PWM_FREQ         = 1_000        # Hz
 
@@ -44,7 +44,7 @@ class BTS7960:
         self.l.duty_u16(min(duty, 65535))
 
     def brake(self, duty=65535):
-        # Both pins HIGH shorts the motor terminals — regenerative braking
+        # Not used — kept for compatibility
         self.l.duty_u16(min(duty, 65535))
         self.r.duty_u16(min(duty, 65535))
 
@@ -94,11 +94,9 @@ async def _ext_run(direction):
         ext.backward(EXT_BCK_SPEED)
     await asyncio.sleep_ms(60_000)
 
-# Brief hard-brake pulse then settle to holding value
+# Settle to a gentle upward hold to fight gravity
 async def _tilt_brake_settle():
-    tilt.brake(65535)
-    await asyncio.sleep_ms(120)
-    tilt.brake(brake_pwm)
+    tilt.forward(brake_pwm)
 
 def tilt_cmd(cmd):
     global _tilt_task
@@ -124,7 +122,7 @@ def all_stop():
     global _tilt_task, _ext_task
     _cancel(_tilt_task); _tilt_task = None
     _cancel(_ext_task);  _ext_task  = None
-    tilt.brake(brake_pwm)
+    tilt.forward(brake_pwm)
     ext.coast()
 
 # Safe default on boot
@@ -184,7 +182,7 @@ input[type=range]{width:92%;accent-color:#0af;margin-top:6px}
             onmouseleave="go('tilt','brake')">&#9660; Down</button>
   </div>
   <div style="margin-top:12px">
-    <label>Hold PWM: <span id="bval">BPWM</span> / 65535</label>
+    <label>Hold (up) PWM: <span id="bval">BPWM</span> / 65535</label>
     <input type="range" min="0" max="65535" step="500" value="BPWM"
       oninput="document.getElementById('bval').textContent=this.value"
       onchange="go('brake',this.value)">
